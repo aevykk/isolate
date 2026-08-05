@@ -21,6 +21,49 @@ For such setup, see "Setup without ZFS"
 Copy =isolate= and =common.sh= to =/usr/local/bin=
 We expect a group =isolate= to exist. Users that shall be able to use =isolate= shall be members of this group.
 
+On NixOS, skip this manual step and use the flake (see "NixOS").
+
+*** NixOS
+This repository is a flake providing an overlay, a package and a NixOS module.
+The module installs =isolate= system-wide, creates the =isolate= group, and generates one systemd path+service pair per template for automatic clone regeneration.
+You remain responsible for creating the template ZFS dataset; it is only named in the config.
+
+Add the flake as an input and wire the overlay + module (mirrors any other local-flake input):
+#+BEGIN_SRC nix
+  inputs.isolate = {
+    url = "path:./isolate";           # or a git URL
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  # in your machine's module list:
+  ({ pkgs, ... }: {
+    nixpkgs.overlays = [ isolate.overlays.default ];
+    services.isolate = {
+      enable = true;
+      templates.debisl = {
+        dataset  = "rpool/isolate/debisl";  # you create this dataset yourself
+        count    = 10;                        # fresh clones to keep available
+        stateDir = "/isolate";                # parent of the dataset's mountpoint
+      };
+    };
+  })
+  isolate.nixosModules.default
+#+END_SRC
+
+Add the users that may use ZFS features to the group, e.g. =users.users.alice.extraGroups = [ "isolate" ];=
+
+=nixos-rebuild switch= succeeds even when the dataset does not exist yet.
+The regenerate service fails cleanly while the dataset is missing:
+#+BEGIN_SRC
+  # before creating the dataset, this fails (by design):
+  systemctl start isolate-regenerate-debisl.service   # -> failed, "cannot open 'rpool/isolate/debisl'"
+#+END_SRC
+Create the template dataset as described below (=Creating the backing Linux system root=), copy the static seccomp wrapper into the template's PATH from =${pkgs.isolate}/bin/seccomp_wrapper= (see step 4 below), then populate clones by (re)starting the unit:
+#+BEGIN_SRC
+  systemctl restart isolate-regenerate-debisl.service
+#+END_SRC
+From then on each isolated run consumes a clone and, on exit, touches the signal file, which triggers the path unit to replenish clones automatically.
+
 *** Creating the backing Linux system root
 In the following, =rpool/isolate/debisl= is the dataset and =/isolate/debisl= its mountpoint. Both may be chosen arbitrarily.
 
