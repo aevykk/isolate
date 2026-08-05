@@ -1,8 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -euo pipefail
 
-USER="$UID"
+ISOLATE_UID="$UID"
 RUNDIR="$(dirname "$(realpath "$0")")"
 source "$RUNDIR/common.sh"
 
@@ -50,7 +50,9 @@ print_usage_and_exit() {
 	echo "  | bwrap  |  X  |    *    |  X  | X        | X    | X   |  X  |     X      |"
 	echo "  | lxc    |  X  |    X    |  X  | X        | X    | X   |     |            |"
 	echo ""
-	echo "  * this changes the uid in the container, which itself STILL RUNS AS UID 0!"
+	echo "  * bwrap always creates a user namespace: in-container uid 0 maps to the"
+	echo "    unprivileged invoking user, so the sandbox never runs as real host root."
+	echo "    -u/-g shift the base uid/gid of that mapping."
 	exit 0
 }
 
@@ -63,7 +65,8 @@ while getopts "e:p:d:xt:hnz:r:v:ifs12qu:g:" o; do
 			ENGINE="$OPTARG"
 			;;
 		p)
-			workdir="$(realpath --canonicalize-missing "$OPTARG")"
+			# guest path: resolve inside the container via `env -C`, not against the host FS
+			workdir="$OPTARG"
 			;;
 		d)
 			dir_mounts+=( "$OPTARG" )
@@ -72,7 +75,7 @@ while getopts "e:p:d:xt:hnz:r:v:ifs12qu:g:" o; do
 			env_variables+=( "$OPTARG" )
 			;;
 		i)
-			trap true INT
+			IGNORE_INT="yes"
 			;;
 		x)
 			set -x
@@ -90,7 +93,7 @@ while getopts "e:p:d:xt:hnz:r:v:ifs12qu:g:" o; do
 			share_net="yes"
 			;;
 		z)
-			id -Gn "$USER" | grep "isolate" 1>/dev/null || die "user not in \`isolate' group, cannot use zfs features"
+			id -Gn "$ISOLATE_UID" | tr ' ' '\n' | grep -qxF "isolate" || die "user not in \`isolate' group, cannot use zfs features"
 			zfs_run="yes"
 			zfs_template="$OPTARG"
 			;;
@@ -114,7 +117,7 @@ while getopts "e:p:d:xt:hnz:r:v:ifs12qu:g:" o; do
 			;;
 		g)
 			GIDBASE="$OPTARG"
-			[[ "$GIDBASE" == +([0-9]) ]] || die "-u ${GIDBASE} is not an integer"
+			[[ "$GIDBASE" == +([0-9]) ]] || die "-g ${GIDBASE} is not an integer"
 			;;
 		h)
 			print_usage_and_exit
@@ -125,10 +128,27 @@ while getopts "e:p:d:xt:hnz:r:v:ifs12qu:g:" o; do
 done
 shift $((OPTIND-1))
 
+# best-effort cleanup on every exit path (normal, error, or interrupt):
+# remove our pidfile, revoke the X11 grant, and notify the regen watcher.
+cleanup() {
+	[[ -n "${PIDFILE:-}" ]] && rm -f "$PIDFILE"
+	[[ -n "${X11:-}" ]] && { xhost -local: 1>/dev/null 2>&1 || true; }
+	[[ -n "${ISOLATE_SIGNALFILE:-}" ]] && { touch "$ISOLATE_SIGNALFILE" 2>/dev/null || true; }
+	return 0
+}
+trap cleanup EXIT
+if [[ -n "${IGNORE_INT:-}" ]]; then
+	# -i: keep running so the guest can handle SIGINT itself
+	trap '' INT
+else
+	# exit on INT/TERM so the EXIT trap gets a chance to clean up
+	trap 'exit 130' INT TERM
+fi
+
 check_lockfile_setup() {
 	touch "$1" || die "run as root for the first run"
 	if (( UID == 0 )); then
-		chown "$USER":isolate "$1"
+		chown "$ISOLATE_UID":isolate "$1"
 		chmod 660 "$1"
 	fi
 }
@@ -143,7 +163,7 @@ refresh_zfs() {
 	local num_should_avail
 	[[ -z "${2:-}" ]] && [[ -z "${SKIPGENNEWZFS:-}" ]] && die "num_should_avail missing"
 
-	local USEDFILE TEMPLATE_MOUNTPOINT FREEFILE ERRORFILE SIGNALFILE LOCKFILE
+	local USEDFILE TEMPLATE_MOUNTPOINT FREEFILE ERRORFILE SIGNALFILE LOCKFILE PIDDIR
 	TEMPLATE_MOUNTPOINT="$(findmnt -d backward -f -n -oTARGET "$zfs_template")"
 	USEDFILE="$(dirname "$TEMPLATE_MOUNTPOINT")/$(basename "$zfs_template")_used"
 	[[ -f "$USEDFILE" ]] || touch "$USEDFILE"
@@ -160,6 +180,11 @@ refresh_zfs() {
 	fi
 	LOCKFILE="$(dirname "$TEMPLATE_MOUNTPOINT")/.$(basename "$zfs_template").lock"
 	check_lockfile_setup "$LOCKFILE"
+	# per-clone pidfiles live here, not in world-writable /tmp; only isolate-group
+	# members may write, so a stranger cannot spoof "in use" and block cleanup
+	PIDDIR="$(dirname "$TEMPLATE_MOUNTPOINT")/.isolate_pids"
+	mkdir -p "$PIDDIR"
+	chown root:isolate "$PIDDIR" && chmod 770 "$PIDDIR"
 
 	(
 		flock -x -w 3 11 || die "template mgmt lock unavailable"
@@ -174,11 +199,16 @@ refresh_zfs() {
 		tmpfile="$(mktemp /tmp/isolate_usedXXXXXX)"
 		while read -r used; do
 			einfo "cleaning used template [$used]"
-			if [[ ! -f "/tmp/isolate_$(basename "$used")" ]] || ! ps -p "$(cat "/tmp/isolate_$(basename "$used")")" > /dev/null; then
+			pidfile="$PIDDIR/$(basename "$used")"
+			if [[ ! -f "$pidfile" ]] || ! ps -p "$(cat "$pidfile")" > /dev/null; then
 				# if the dataset does not exist, forget that we know it
-				zfs list "$used" > /dev/null || continue
+				zfs list "$used" > /dev/null || { rm -f "$pidfile"; continue; }
 				# if it exists but fails to destroy, it might be in use. Try again later
-				zfs destroy "$used" || (eattention "error destroying $used"; touch "$ERRORFILE"; echo "$used" >> "$tmpfile")
+				if zfs destroy -r "$used"; then
+					rm -f "$pidfile"
+				else
+					eattention "error destroying $used"; touch "$ERRORFILE"; echo "$used" >> "$tmpfile"
+				fi
 			else
 				eattention "dataset $used is in use, skipping destroy"
 				echo "$used" >> "$tmpfile"
@@ -206,7 +236,7 @@ refresh_zfs() {
 		if (( 10#$(wc -l < "$FREEFILE") < 10#$num_should_avail )); then
 			num_to_create=$(( 10#$num_should_avail - 10#$(wc -l < "$FREEFILE") ))
 			for i in $(seq 1 "$num_to_create"); do
-				fresh_template="${zfs_template}_$(date "+%s%N")"
+				fresh_template="${zfs_template}_$(date "+%s%N")_${i}"
 				einfo "creating clone ${fresh_template}, adding to freshlist"
 				zfs clone "${snapshot}" "$fresh_template"
 				echo "$fresh_template" >> "$FREEFILE"
@@ -223,12 +253,13 @@ consume_fresh_zfs_template_respawn() {
 	zfs_template="$1"
 	zfs list "$zfs_template" 1>/dev/null || die "invalid zfs template $zfs_template"
 
-	local USEDFILE TEMPLATE_MOUNTPOINT FREEFILE SIGNALFILE LOCKFILE
+	local USEDFILE TEMPLATE_MOUNTPOINT FREEFILE SIGNALFILE LOCKFILE PIDDIR
 	TEMPLATE_MOUNTPOINT="$(findmnt -d backward -f -n -oTARGET "$zfs_template")"
 	USEDFILE="$(dirname "$TEMPLATE_MOUNTPOINT")/$(basename "$zfs_template")_used"
 	FREEFILE="$(dirname "$TEMPLATE_MOUNTPOINT")/$(basename "$zfs_template")_fresh"
 	SIGNALFILE="$(dirname "$TEMPLATE_MOUNTPOINT")/.signal-$(basename "$zfs_template")"
 	LOCKFILE="$(dirname "$TEMPLATE_MOUNTPOINT")/.$(basename "$zfs_template").lock"
+	PIDDIR="$(dirname "$TEMPLATE_MOUNTPOINT")/.isolate_pids"
 	check_lockfile_setup "$LOCKFILE"
 
 	exec 11>"$LOCKFILE"
@@ -252,6 +283,8 @@ consume_fresh_zfs_template_respawn() {
 	export ISOLATE_ZFSPREPAREDONE="yes"
 	export ISOLATE_ZFSMOUNTPOINT="$to_use_mountpoint"
 	export ISOLATE_SIGNALFILE="$SIGNALFILE"
+	# the respawned process records its pid here so refresh can tell the clone is in use
+	export ISOLATE_PIDFILE="$PIDDIR/$(basename "$to_use")"
 	# respawn on that template
 	"$0" "${orig_args[@]}"
 }
@@ -295,11 +328,10 @@ lets_go_bwrap() {
 	[[ -z "${*:2}" ]] && print_usage_and_exit
 	einfo "ISOLATING ${*:2} in root $rootfs"
 	# as long as we use our seccomp wrapper we dont need --new-session
-	cmd=( "bwrap" "--setenv" "PATH" "/usr/local/bin:/usr/bin:/bin:/usr/sbin" "--hostname" "$(basename "$rootfs")" "--cap-drop" "ALL" "--die-with-parent" "--uid" "${UIDBASE:-0}" "--gid" "${GIDBASE:-0}" "--unshare-ipc" "--unshare-pid" "--unshare-uts" "--unshare-cgroup" "--ro-bind" "$rootfs" "/" "--dev" "/dev" "--proc" "/proc" "--tmpfs" "/tmp" "--tmpfs" "/home" "--chdir" "/" )
-	if [[ -n "${UIDBASE:-}" ]] || [[ -n "${GIDBASE:-}" ]]; then
-		einfo "CREATING NEW USERNS"
-		cmd+=( "--unshare-user" )
-	fi
+	# --unshare-user is always set: it maps the in-container uid 0 to the unprivileged
+	# invoking user instead of real host root, so the sandbox never runs as host root
+	einfo "CREATING NEW USERNS"
+	cmd=( "bwrap" "--setenv" "PATH" "/usr/local/bin:/usr/bin:/bin:/usr/sbin" "--hostname" "$(basename "$rootfs")" "--cap-drop" "ALL" "--die-with-parent" "--unshare-user" "--uid" "${UIDBASE:-0}" "--gid" "${GIDBASE:-0}" "--unshare-ipc" "--unshare-pid" "--unshare-uts" "--unshare-cgroup" "--ro-bind" "$rootfs" "/" "--dev" "/dev" "--proc" "/proc" "--tmpfs" "/tmp" "--tmpfs" "/home" "--chdir" "/" )
 	if [[ -n "${share_net:-}" ]]; then
 		einfo "ENABLING NETWORK SUPPORT"
 		cmd+=( "--share-net" )
@@ -308,7 +340,8 @@ lets_go_bwrap() {
 	fi
 	if [[ -n "${X11:-}" ]]; then
 		eattention "ALLOWING CONTAINER TO CONNECT TO X11"
-		xhost +local:
+		# grant is revoked by the cleanup trap on exit
+		xhost +local: || ewarn "xhost +local: failed; X11 may not work"
 		einfo "ENABLING X11 SUPPORT"
 		cmd+=( "--ro-bind" "/tmp/.X11-unix" "/tmp/.X11-unix" )
 	fi
@@ -319,21 +352,19 @@ lets_go_bwrap() {
 		cmd+=( "--bind" "/tmp/pulse-socket" "/pulse-guest.socket" )
 	fi
 	for dir_mount in "${dir_mounts[@]}"; do
-		IFS=':'; from_to=($dir_mount); unset IFS;
-		from="${from_to[0]:-}"
-		[[ -z "$from" ]] && die "-o ${dir_mount} is invalid"
-		to="${from_to[1]:-}"
-		[[ -z "$to" ]] && die "-o ${dir_mount} is invalid"
+		[[ "$dir_mount" == *:* ]] || die "-d ${dir_mount} is invalid"
+		from="${dir_mount%%:*}"
+		to="${dir_mount#*:}"
+		[[ -z "$from" || -z "$to" ]] && die "-d ${dir_mount} is invalid"
 		einfo "Mounting $(realpath "$from") -> $(realpath --canonicalize-missing "$to")"
 		cmd+=( "--dir" "$(realpath --canonicalize-missing "$to")" )
 		cmd+=( "--bind" "$(realpath "$from")" "$(realpath --canonicalize-missing "$to")" )
 	done
 	for env_variable in "${env_variables[@]}"; do
-		IFS=':'; name_value=($env_variable); unset IFS;
-		name="${name_value[0]:-}"
-		[[ -z "$name" ]] && die "-d ${env_variable} is invalid"
-		value="${name_value[1]:-}"
-		[[ -z "$value" ]] && die "-d ${env_variable} is invalid"
+		[[ "$env_variable" == *:* ]] || die "-v ${env_variable} is invalid"
+		name="${env_variable%%:*}"
+		value="${env_variable#*:}"
+		[[ -z "$name" ]] && die "-v ${env_variable} is invalid"
 		einfo "setting $name to \`$value'"
 		cmd+=( "--setenv" "$name" "$value" )
 	done
@@ -410,20 +441,18 @@ EOF
 	fi
 
 	for dir_mount in "${dir_mounts[@]}"; do
-		IFS=':'; from_to=($dir_mount); unset IFS;
-		from="${from_to[0]:-}"
-		[[ -z "$from" ]] && die "-d ${dir_mount} is invalid"
-		to="${from_to[1]:-}"
-		[[ -z "$to" ]] && die "-d ${dir_mount} is invalid"
+		[[ "$dir_mount" == *:* ]] || die "-d ${dir_mount} is invalid"
+		from="${dir_mount%%:*}"
+		to="${dir_mount#*:}"
+		[[ -z "$from" || -z "$to" ]] && die "-d ${dir_mount} is invalid"
 		einfo "Mounting $(realpath "$from") -> ${to#/}"
 		echo "lxc.mount.entry = $(realpath "$from") ${to#/} none bind,create=dir" >> "$LXC_CONF_TARGET"
 	done
 	for env_variable in "${env_variables[@]}"; do
-		IFS=':'; name_value=($env_variable); unset IFS;
-		name="${name_value[0]:-}"
-		[[ -z "$name" ]] && die "-d ${env_variable} is invalid"
-		value="${name_value[1]:-}"
-		[[ -z "$value" ]] && die "-d ${env_variable} is invalid"
+		[[ "$env_variable" == *:* ]] || die "-v ${env_variable} is invalid"
+		name="${env_variable%%:*}"
+		value="${env_variable#*:}"
+		[[ -z "$name" ]] && die "-v ${env_variable} is invalid"
 		einfo "setting $name to \`$value'"
 		echo "lxc.environment = $name=$value" >> "$LXC_CONF_TARGET"
 	done
@@ -470,10 +499,16 @@ else
 		exit "${ISOLATE_EXITCODE:-0}"
 	fi
 
+	[[ -d "$rootfs" ]] || die "rootfs $rootfs does not exist"
+
 	einfo "Using engine ${ENGINE:-bwrap}, wroom wroom"
-	PIDFILE="/tmp/isolate_$(basename "$rootfs")"
-	PIDFILE="${PIDFILE/%\//slash}"
-	echo "$$" > "$PIDFILE"
+	# on a zfs clone, record our pid so the refresh path knows the clone is in use.
+	# the pidfile lives in the group-writable .isolate_pids dir (see consume/refresh),
+	# and is removed by the cleanup trap on exit. template (-t) mode needs no pidfile.
+	if [[ -n "${ISOLATE_PIDFILE:-}" ]]; then
+		PIDFILE="$ISOLATE_PIDFILE"
+		echo "$$" > "$PIDFILE"
+	fi
 	case "${ENGINE:-bwrap}" in
 		bwrap)
 			lets_go_bwrap "$rootfs" "$@" || ISOLATE_EXITCODE="$?"
@@ -485,8 +520,7 @@ else
 			lets_go_chroot "$rootfs" "$@" || ISOLATE_EXITCODE="$?"
 			;;
 	esac
-	rm -f "$PIDFILE"
-	[[ -z "${ISOLATE_SIGNALFILE:-}" ]] || touch "$ISOLATE_SIGNALFILE"
+	# pidfile removal and signal-file touch are handled by the cleanup trap
 
 	einfo "ISOLATE exiting, thanks for playing"
 	exit "${ISOLATE_EXITCODE:-0}"
