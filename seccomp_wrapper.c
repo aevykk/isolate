@@ -4,21 +4,37 @@
 #include <seccomp.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <sys/ioctl.h>
 #include <fcntl.h>
 #include <sys/mount.h>
 #include <unistd.h>
 
 int main(int argc, char *argv[]) {
 	fprintf(stderr, "--> SECCOMP WRAPPER ACTIVE <--\n");
-    scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_ALLOW);
-	// filter all TIOCSTI calls, disallowing writing to the parent tty
-	if(seccomp_rule_add(ctx, SCMP_ACT_KILL_PROCESS, SCMP_SYS(ioctl), 1,
-						SCMP_A1(SCMP_CMP_EQ, TIOCSTI, TIOCSTI))){
-		if (ctx) seccomp_release(ctx);
-		fprintf(stderr, "[1471] failed to install seccomp filter\n");
+
+	if (argc < 2) {
+		fprintf(stderr, "usage: %s command [args]...\n", argv[0]);
 		return 1;
 	}
-    if(seccomp_load(ctx)){
+
+	scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_ALLOW);
+
+	// also filter the compat ABIs so a 32-bit binary cannot bypass the filter.
+	// EEXIST for the native arch is expected and ignored.
+	seccomp_arch_add(ctx, SCMP_ARCH_X86);
+	seccomp_arch_add(ctx, SCMP_ARCH_X32);
+
+	// block terminal-injection ioctls that could push input to the host tty
+	const int injection_ioctls[] = { TIOCSTI, TIOCLINUX };
+	for (unsigned i = 0; i < sizeof(injection_ioctls) / sizeof(injection_ioctls[0]); i++) {
+		if (seccomp_rule_add(ctx, SCMP_ACT_KILL_PROCESS, SCMP_SYS(ioctl), 1,
+							 SCMP_A1(SCMP_CMP_EQ, injection_ioctls[i], injection_ioctls[i]))) {
+			if (ctx) seccomp_release(ctx);
+			fprintf(stderr, "[1471] failed to install seccomp filter\n");
+			return 1;
+		}
+	}
+	if(seccomp_load(ctx)){
 		fprintf(stderr, "[1472] failed to load seccomp context\n");
 		return 1;
 	}
