@@ -4,8 +4,10 @@ Supported backends are bubblewrap, lxc and chroot.
 Latter is mainly thought for updating the underlying Linux system root.
 
 A unique, fresh ZFS clone is used as dataset for each isolation, and discarded after use.
-Changes to the dataset are made on disk, preventing high memory usage under load.
 A privileged daemon cleans up used clones and provides fresh clones.
+
+For the =lxc= and =chroot= engines the clone's root is mounted read-write, so changes are made on disk (ZFS copy-on-write), preventing high memory usage under load.
+The =bwrap= engine intentionally mounts the root read-only and layers writable =tmpfs= over =/tmp= and =/home=; guest writes elsewhere do not persist and are backed by memory.
 
 The project consists of the main script =isolate=, the common bindings =common.sh= and =seccomp_wrapper.c=, which complements bubblewrap.
 Latter works around bubblewraps =--new-session= option, which prevents feeding input from the isolated environment to the host terminal, but also prevents job control of the spawned shell.
@@ -135,5 +137,7 @@ SUPPORTED BY ENGINE
   | bwrap  |  X  |    *    |  X  | X        | X    | X   |  X  |     X      |
   | lxc    |  X  |    X    |  X  | X        | X    | X   |     |            |
 
-  * this changes the uid in the container, which itself STILL RUNS AS UID 0!
+  * bwrap always creates a user namespace: in-container uid 0 maps to the
+    unprivileged invoking user, so the sandbox never runs as real host root.
+    -u/-g shift the base uid/gid of that mapping.
 #+END_SRC
