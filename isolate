@@ -23,6 +23,8 @@ print_usage_and_exit() {
 	echo "         -p: pwd: switch to this directory on spawn. Defaults to /"
 	echo "         -1: bind X11 socket into guest"
 	echo "         -2: bind Pulseaudio socket into guest"
+	echo "         -3: bind Wayland socket into guest (uses WAYLAND_DISPLAY/XDG_RUNTIME_DIR)"
+	echo "         -4: expose GPU (/dev/dri) into guest for hardware acceleration"
 	echo "         -n: share host network"
 	echo "         -x: trace"
 	echo "         -f: regenerate ALL templates of given zfs template"
@@ -44,11 +46,11 @@ print_usage_and_exit() {
 	echo "   DEBUG_LXC_SPAWN [=!'']: if nonzero len, write lxc start log to /tmp/isolate_lxc_log"
 	echo ""
 	echo "SUPPORTED BY ENGINE"
-	echo "  | engine | env | {U/G}ID | net | cmd+args | dirs | pwd | X11 | Pulseaudio |"
-	echo "  |--------+-----|---------------+----------+------|-----+-----+------------|"
-	echo "  | chroot |     |         |  X  | X        |      |     |     |            |"
-	echo "  | bwrap  |  X  |    *    |  X  | X        | X    | X   |  X  |     X      |"
-	echo "  | lxc    |  X  |    X    |  X  | X        | X    | X   |     |            |"
+	echo "  | engine | env | {U/G}ID | net | cmd+args | dirs | pwd | X11 | Pulseaudio | Wayland | GPU |"
+	echo "  |--------+-----|---------------+----------+------|-----+-----+------------+---------+-----|"
+	echo "  | chroot |     |         |  X  | X        |      |     |     |            |         |     |"
+	echo "  | bwrap  |  X  |    *    |  X  | X        | X    | X   |  X  |     X      |    X    |  X  |"
+	echo "  | lxc    |  X  |    X    |  X  | X        | X    | X   |     |            |         |     |"
 	echo ""
 	echo "  * bwrap always creates a user namespace: in-container uid 0 maps to the"
 	echo "    unprivileged invoking user, so the sandbox never runs as real host root."
@@ -59,7 +61,7 @@ print_usage_and_exit() {
 orig_args=( "$@" )
 dir_mounts=( )
 env_variables=( )
-while getopts "e:p:d:xt:hnz:r:v:ifs12qu:g:" o; do
+while getopts "e:p:d:xt:hnz:r:v:ifs1234qu:g:" o; do
 	case "$o" in
 		e)
 			ENGINE="$OPTARG"
@@ -85,6 +87,12 @@ while getopts "e:p:d:xt:hnz:r:v:ifs12qu:g:" o; do
 			;;
 		2)
 			PULSE="yes"
+			;;
+		3)
+			WAYLAND="yes"
+			;;
+		4)
+			DRI="yes"
 			;;
 		t)
 			template="$OPTARG"
@@ -347,9 +355,36 @@ lets_go_bwrap() {
 	fi
 	if [[ -n "${PULSE:-}" ]]; then
 		eattention "ALLOWING CONTAINER TO CONNECT TO PULSEAUDIO"
-		einfo "setting PULSE_SERVER=unix:/pulse-guest.socket"
-		cmd+=( "--setenv" "PULSE_SERVER" "unix:/pulse-guest.socket" )
-		cmd+=( "--bind" "/tmp/pulse-socket" "/pulse-guest.socket" )
+		# guest socket goes under /tmp (a tmpfs): the rootfs is ro, so a bind
+		# target at / cannot be created
+		einfo "setting PULSE_SERVER=unix:/tmp/pulse-guest.socket"
+		cmd+=( "--setenv" "PULSE_SERVER" "unix:/tmp/pulse-guest.socket" )
+		cmd+=( "--bind" "/tmp/pulse-socket" "/tmp/pulse-guest.socket" )
+	fi
+	if [[ -n "${WAYLAND:-}" ]]; then
+		eattention "ALLOWING CONTAINER TO CONNECT TO WAYLAND"
+		# no xhost-style grant needed: access is just fs permission on the socket,
+		# which the invoking user (== container uid 0 via userns) already owns
+		wl_sock="${WAYLAND_DISPLAY:-wayland-0}"
+		# libwayland treats a WAYLAND_DISPLAY containing '/' as an absolute path
+		[[ "$wl_sock" == /* ]] || wl_sock="${XDG_RUNTIME_DIR:-/run/user/$UID}/$wl_sock"
+		if [[ -S "$wl_sock" ]]; then
+			# guest socket under /tmp (tmpfs); the ro rootfs has no writable /
+			einfo "binding $wl_sock -> /tmp/wayland-guest.socket, WAYLAND_DISPLAY=/tmp/wayland-guest.socket"
+			cmd+=( "--setenv" "WAYLAND_DISPLAY" "/tmp/wayland-guest.socket" )
+			cmd+=( "--bind" "$wl_sock" "/tmp/wayland-guest.socket" )
+		else
+			ewarn "wayland socket $wl_sock not found; skipping wayland passthrough"
+		fi
+	fi
+	if [[ -n "${DRI:-}" ]]; then
+		eattention "EXPOSING GPU (/dev/dri) TO CONTAINER"
+		# appended after the base --dev /dev, so it lands on the fresh devtmpfs
+		if [[ -d /dev/dri ]]; then
+			cmd+=( "--dev-bind" "/dev/dri" "/dev/dri" )
+		else
+			ewarn "/dev/dri not present on host; skipping GPU passthrough"
+		fi
 	fi
 	for dir_mount in "${dir_mounts[@]}"; do
 		[[ "$dir_mount" == *:* ]] || die "-d ${dir_mount} is invalid"
