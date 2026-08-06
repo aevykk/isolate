@@ -118,10 +118,19 @@ Copy =isolate_regenerate@.path= and =isolate_regenerate@.service= to =/etc/syste
 
 To enable regeneration for =rpool/isolate/debisl=, enable =isolate_regenerate@debisl.path= through =systemctl enable --now isolate_regenerate@debisl.path=
 
-*** X11 and Pulseaudio passthrough
-X11 access from the isolated environment is only supported with the =bwrap= engine, as is pulseaudio support.
-X11 should work without any configuration.
-For pulseaudio to work, you will have to allow anonymous access onto the pulse socket.
+*** X11, Wayland, Pulseaudio and GPU passthrough
+Display, audio and GPU passthrough are only supported with the =bwrap= engine.
+
+X11 (=-1=) should work without any configuration.
+
+Wayland (=-3=) binds the compositor socket (=$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY=) into the guest and points =WAYLAND_DISPLAY= at it.
+Unlike X11, no =xhost=-style grant is needed: access is just filesystem permission on the socket, which the invoking user already holds (=bwrap= maps the in-container uid 0 to that user).
+For pure X11 clients on a Wayland host, XWayland means =-1= keeps working.
+
+GPU (=-4=) binds =/dev/dri= into the guest for hardware acceleration; combine with =-3= for accelerated Wayland (=-3 -4=).
+Two guest-side prerequisites apply: the template rootfs must contain the GPU userspace drivers (e.g. Mesa), because =bwrap= exposes only the template filesystem, not the host; and the invoking user needs access to the render node (usually the =render=/=video= group, or a world-readable =renderD*=).
+
+For pulseaudio (=-2=) to work, you will have to allow anonymous access onto the pulse socket.
 Add the following to =/etc/pulse/default.pa=:
 #+BEGIN_SRC
   load-module module-native-protocol-unix auth-anonymous=1 socket=/tmp/pulse-socket
@@ -153,6 +162,8 @@ OPTIONS
          -p: pwd: switch to this directory on spawn. Defaults to /
          -1: bind X11 socket into guest
          -2: bind Pulseaudio socket into guest
+         -3: bind Wayland socket into guest (uses WAYLAND_DISPLAY/XDG_RUNTIME_DIR)
+         -4: expose GPU (/dev/dri) into guest for hardware acceleration
          -n: share host network
          -x: trace
          -f: regenerate ALL templates of given zfs template
@@ -174,11 +185,11 @@ ENVIRONMENT VARIABLES
    DEBUG_LXC_SPAWN [=!'']: if nonzero len, write lxc start log to /tmp/isolate_lxc_log
 
 SUPPORTED BY ENGINE
-  | engine | env | {U/G}ID | net | cmd+args | dirs | pwd | X11 | Pulseaudio |
-  |--------+-----|---------------+----------+------|-----+-----+------------|
-  | chroot |     |         |  X  | X        |      |     |     |            |
-  | bwrap  |  X  |    *    |  X  | X        | X    | X   |  X  |     X      |
-  | lxc    |  X  |    X    |  X  | X        | X    | X   |     |            |
+  | engine | env | {U/G}ID | net | cmd+args | dirs | pwd | X11 | Pulseaudio | Wayland | GPU |
+  |--------+-----|---------------+----------+------|-----+-----+------------+---------+-----|
+  | chroot |     |         |  X  | X        |      |     |     |            |         |     |
+  | bwrap  |  X  |    *    |  X  | X        | X    | X   |  X  |     X      |    X    |  X  |
+  | lxc    |  X  |    X    |  X  | X        | X    | X   |     |            |         |     |
 
   * bwrap always creates a user namespace: in-container uid 0 maps to the
     unprivileged invoking user, so the sandbox never runs as real host root.
