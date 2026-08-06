@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 {
   description = "isolate — single-use ZFS-clone sandbox launcher (bwrap/lxc/chroot)";
 

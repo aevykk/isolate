@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 { lib
 , stdenv
 , makeWrapper
@@ -89,7 +90,7 @@ stdenv.mkDerivation {
       The static seccomp_wrapper (passthru.seccompWrapper, also at
       $out/bin/seccomp_wrapper) must be copied into the template rootfs PATH.
     '';
-    license = licenses.mit;
+    license = licenses.gpl3Plus;
     platforms = [ "x86_64-linux" ];
     maintainers = with maintainers; [ rednael ];
     mainProgram = "isolate";
