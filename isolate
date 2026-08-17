@@ -121,7 +121,7 @@ while getopts "e:p:d:xt:hnz:r:v:ifs1234qu:g:w:" o; do
 			share_net="yes"
 			;;
 		z)
-			id -Gn "$ISOLATE_UID" | tr ' ' '\n' | grep -qxF "isolate" || die "user not in \`isolate' group, cannot use zfs features"
+			[[ $EUID -eq 0 || " $(id -nG) " == *" isolate "* ]] || die "must be root or in \`isolate' group to use zfs features"
 			zfs_run="yes"
 			zfs_template="$OPTARG"
 			;;
