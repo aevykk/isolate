@@ -510,14 +510,12 @@ lets_go_lxc() {
 	cat <<-EOF > "$LXC_CONF_TARGET"
 		lxc.include = ${lxc_config_dir}/common.conf
 		lxc.include = ${lxc_config_dir}/userns.conf
-		lxc.cgroup.devices.deny = a # Deny all access to devices
+		lxc.cgroup2.devices.deny = a # Deny all access to devices
 		lxc.idmap = u 0 ${UIDBASE:-0} 131072
 		lxc.idmap = g 0 ${GIDBASE:-0} 131072
 		lxc.rootfs.path = $rootfs
 		lxc.mount.entry = none tmp tmpfs mode=1777,size=256M 0 0
 		lxc.uts.name = $CTR_NAME
-		lxc.cgroup.memory.memsw.limit_in_bytes = $((max_mem_mb * 1000000))
-		lxc.cgroup.memory.limit_in_bytes = $((max_mem_mb * 1000000))
 		lxc.cgroup2.memory.max = ${max_mem_mb}M
 		lxc.cgroup2.memory.swap.max = ${max_mem_mb}M
 		lxc.cgroup2.cpu.max = $(( 10#$nproc_assign * 100000)) 100000
@@ -535,7 +533,7 @@ EOF
 	if [[ -n "${LXC_MAP_TUN:-}" ]]; then
 		einfo "ENABLING TUN DEVICE (/dev/net/tun) SUPPORT"
 		cat <<-EOF >> "$LXC_CONF_TARGET"
-		lxc.cgroup.devices.allow = c 10:200 rwm
+		lxc.cgroup2.devices.allow = c 10:200 rwm
 		lxc.mount.entry = /dev/net dev/net none bind,create=dir 0 0
 		#lxc.cap.keep = mknod
 EOF
