@@ -29,6 +29,7 @@ print_usage_and_exit() {
 	echo "spawn:                        $0 [-e engine] [-z zfs_template] [-1] [-2] [-n] [-p pwd] [-d dir_host:target_ctr]... [-v env_name:env_value]... [command] [args] ..."
 	echo "refresh available zfs clones: $0 [-r template] [-f] [-s] [num_should_avail]"
 	echo "  [!] refresh ALWAYS uses the latest snapshot on the dataset"
+	echo "install seccomp wrapper:      $0 -w template"
 	echo ""
 	echo "OPTIONS"
 	echo "         -e: engine: one of {bwrap, chroot, lxc}, defaults to bwrap"
@@ -48,6 +49,7 @@ print_usage_and_exit() {
 	echo "         -f: regenerate ALL templates of given zfs template"
 	echo "         -s: skip generating new clones"
 	echo "         -q: quiet: only print warnings and prompts"
+	echo "         -w: compile/install seccomp_wrapper into template's /usr/bin (arg: template dir or zfs dataset)"
 	echo ""
 	echo "  add all users that should be able to use zfs features to the \`isolate' group"
 	echo ""
@@ -79,7 +81,7 @@ print_usage_and_exit() {
 orig_args=( "$@" )
 dir_mounts=( )
 env_variables=( )
-while getopts "e:p:d:xt:hnz:r:v:ifs1234qu:g:" o; do
+while getopts "e:p:d:xt:hnz:r:v:ifs1234qu:g:w:" o; do
 	case "$o" in
 		e)
 			ENGINE="$OPTARG"
@@ -136,6 +138,10 @@ while getopts "e:p:d:xt:hnz:r:v:ifs1234qu:g:" o; do
 			;;
 		q)
 			QUIET="yes"
+			;;
+		w)
+			do_install_wrapper="yes"
+			wrapper_target="$OPTARG"
 			;;
 		u)
 			UIDBASE="$OPTARG"
@@ -271,6 +277,41 @@ refresh_zfs() {
 			einfo "enough fresh templates ($(wc -l < "$FREEFILE")) are available"
 		fi
 	) 11>"$LOCKFILE"
+}
+
+# install the seccomp wrapper into a template rootfs at /usr/bin/seccomp_wrapper.
+# packaged installs (e.g. nix) ship a prebuilt static binary next to this script,
+# which is preferred; otherwise compile seccomp_wrapper.c from the checkout.
+# $1 is a template directory or a zfs dataset name
+install_seccomp_wrapper() {
+	local target root dest
+	target="$1"
+	if [[ -d "$target" ]]; then
+		root="$target"
+	else
+		root="$(findmnt -d backward -f -n -oTARGET "$target" || true)"
+		[[ -z "$root" ]] && die "$target is neither a directory nor a mounted zfs dataset"
+	fi
+	dest="$root/usr/bin/seccomp_wrapper"
+
+	if [[ -f "$RUNDIR/seccomp_wrapper" ]]; then
+		einfo "installing prebuilt $RUNDIR/seccomp_wrapper -> $dest"
+		install -Dm755 "$RUNDIR/seccomp_wrapper" "$dest" || die "cannot install to $dest (run as root?)"
+		return
+	fi
+
+	[[ -f "$RUNDIR/seccomp_wrapper.c" ]] || die "neither seccomp_wrapper binary nor seccomp_wrapper.c found in $RUNDIR"
+	command -v gcc 1>/dev/null || die "gcc not found, cannot compile seccomp_wrapper"
+	local tmp
+	tmp="$(mktemp /tmp/seccomp_wrapperXXXXXX)"
+	einfo "compiling $RUNDIR/seccomp_wrapper.c (static)"
+	if ! gcc "$RUNDIR/seccomp_wrapper.c" -static -o "$tmp" -lseccomp; then
+		rm -f "$tmp"
+		die "compilation failed; static libseccomp required (debian: libseccomp-dev, gentoo: libseccomp with USE=static-libs)"
+	fi
+	einfo "installing $tmp -> $dest"
+	install -Dm755 "$tmp" "$dest" || { rm -f "$tmp"; die "cannot install to $dest (run as root?)"; }
+	rm -f "$tmp"
 }
 
 # get a fresh zfs template for the template in $1, respawn the script and use as template
@@ -533,6 +574,11 @@ EOF
 ################################################################################
 ##################################### MAIN #####################################
 ################################################################################
+
+if [[ -n "${do_install_wrapper:-}" ]]; then
+	install_seccomp_wrapper "$wrapper_target"
+	exit 0
+fi
 
 [[ -z "${zfs_template:-}" ]] && [[ -z "${template:-}" ]] && die "missing template or zfs template"
 

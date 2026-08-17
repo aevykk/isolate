@@ -58,7 +58,7 @@ The regenerate service fails cleanly while the dataset is missing:
   # before creating the dataset, this fails (by design):
   systemctl start isolate-regenerate-debisl.service   # -> failed, "cannot open 'rpool/isolate/debisl'"
 #+END_SRC
-Create the template dataset as described below (=Creating the backing Linux system root=), copy the static seccomp wrapper into the template's PATH from =${pkgs.isolate}/bin/seccomp_wrapper= (see step 4 below), then populate clones by (re)starting the unit:
+Create the template dataset as described below (=Creating the backing Linux system root=), install the seccomp wrapper with =isolate -w /isolate/debisl= (uses the prebuilt static binary shipped with the package, no compiler needed), then populate clones by (re)starting the unit:
 #+BEGIN_SRC
   systemctl restart isolate-regenerate-debisl.service
 #+END_SRC
@@ -70,20 +70,18 @@ In the following, =rpool/isolate/debisl= is the dataset and =/isolate/debisl= it
 Do the following steps as root user:
 1. Create a system Linux system root dataset root, e.g. =zfs create rpool/isolate/debisl=
 2. Create a template Linux system root using e.g. =debootstrap /isolate/debisl=
-3. [only bwrap] Compile the seccomp wrapper. You need the libseccomp static libs for this step.
+3. [only bwrap] Install the seccomp wrapper into the template: =isolate -w /isolate/debisl=
+   This copies the prebuilt static binary shipped next to =isolate= (e.g. by the nix package). When none is shipped (e.g. a git checkout), it compiles =seccomp_wrapper.c= instead; you then need gcc and the libseccomp static libs:
   #+BEGIN_SRC
   gentoo: install libseccomp, USE: static-libs
   debian: install libseccomp-dev
-
-  gcc seccomp_wrapper.c -static -o seccomp_wrapper /usr/lib/x86_64-linux-gnu/libseccomp.a
   #+END_SRC
-4. [only bwrap] Copy the seccomp wrapper into the root dataset such that it is in the PATH of the spawned isolated environment, e.g. =/usr/bin/seccomp_wrapper=
-5. Chroot into the environment and install what you need =isolate -e chroot -t /isolate/debisl bash=
-6. After you are done, create a snapshot
+4. Chroot into the environment and install what you need =isolate -e chroot -t /isolate/debisl bash=
+5. After you are done, create a snapshot
   #+BEGIN_SRC
   zfs snapshot "rpool/isolate/debisl@$(date "+%Y%m%dT%H%M%SZ")"
   #+END_SRC
-7. Generate clones for usage by =isolate=: =isolate -r rpool/isolate/debisl 5=
+6. Generate clones for usage by =isolate=: =isolate -r rpool/isolate/debisl 5=
 
 Your ZFS structure will look somewhat like this:
 #+BEGIN_SRC
@@ -150,6 +148,7 @@ spawn:                        ./isolate [-e engine] [-t templatedir] [-1] [-2] [
 spawn:                        ./isolate [-e engine] [-z zfs_template] [-1] [-2] [-n] [-p pwd] [-d dir_host:target_ctr]... [-v env_name:env_value]... [command] [args] ...
 refresh available zfs clones: ./isolate [-r template] [-f] [-s] [num_should_avail]
   [!] refresh ALWAYS uses the latest snapshot on the dataset
+install seccomp wrapper:      ./isolate -w template
 
 OPTIONS
          -e: engine: one of {bwrap, chroot, lxc}, defaults to bwrap
@@ -169,6 +168,7 @@ OPTIONS
          -f: regenerate ALL templates of given zfs template
          -s: skip generating new clones
          -q: quiet: only print warnings and prompts
+         -w: compile/install seccomp_wrapper into template's /usr/bin (arg: template dir or zfs dataset)
 
   add all users that should be able to use zfs features to the `isolate' group
 
