@@ -25,7 +25,7 @@ RUNDIR="$(dirname "$(realpath "$0")")"
 source "$RUNDIR/common.sh"
 
 print_usage_and_exit() {
-        local binname="$(basename "$0")"
+	local binname="$(basename "$0")"
 	echo "spawn:                        $binname [-e engine] [-t templatedir] [-1] [-2] [-n] [-p pwd] [-d dir_host:target_ctr]... [-v env_name:env_value]... [command] [args] ..."
 	echo "spawn:                        $binname [-e engine] [-z zfs_template] [-1] [-2] [-n] [-p pwd] [-d dir_host:target_ctr]... [-v env_name:env_value]... [command] [args] ..."
 	echo "refresh available zfs clones: $binname [-r template] [-f] [-s] [num_should_avail]"
@@ -495,6 +495,12 @@ lets_go_lxc() {
 	fi
 	mkdir -p "$(dirname "$LXC_CONF_TARGET")"
 
+	# on FHS distros the stock configs live in /usr/share/lxc/config; on nix
+	# they sit in the lxc package's own prefix, so derive it from lxc-start
+	lxc_config_dir="$(dirname "$(dirname "$(realpath "$(command -v lxc-start)")")")/share/lxc/config"
+	[[ -f "$lxc_config_dir/common.conf" ]] || lxc_config_dir="/usr/share/lxc/config"
+	[[ -f "$lxc_config_dir/common.conf" ]] || die "cannot locate lxc config dir (common.conf)"
+
 	einfo "DEFINING container $CTR_NAME"
 	max_mem_mb="${LXC_MEM_MB_QUOTA:-$(( $(grep -o -P "(?<=^MemTotal:)[ 0-9]+" /proc/meminfo | tr -d " ") / 1000 / 20 ))}"
 	LXC_CPU_QUOTA="${LXC_CPU_QUOTA:-20}"
@@ -502,8 +508,8 @@ lets_go_lxc() {
     nproc_assign=$(( $(nproc) / (100 / 10#$LXC_CPU_QUOTA) ))
 	(( 10#$nproc_assign < 1 )) && nproc_assign=1
 	cat <<-EOF > "$LXC_CONF_TARGET"
-		lxc.include = /usr/share/lxc/config/common.conf
-		lxc.include = /usr/share/lxc/config/userns.conf
+		lxc.include = ${lxc_config_dir}/common.conf
+		lxc.include = ${lxc_config_dir}/userns.conf
 		lxc.cgroup.devices.deny = a # Deny all access to devices
 		lxc.idmap = u 0 ${UIDBASE:-0} 131072
 		lxc.idmap = g 0 ${GIDBASE:-0} 131072
