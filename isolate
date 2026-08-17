@@ -399,7 +399,7 @@ lets_go_bwrap() {
 	# --unshare-user is always set: it maps the in-container uid 0 to the unprivileged
 	# invoking user instead of real host root, so the sandbox never runs as host root
 	einfo "CREATING NEW USERNS"
-	cmd=( "bwrap" "--setenv" "PATH" "/usr/local/bin:/usr/bin:/bin:/usr/sbin" "--hostname" "$(basename "$rootfs")" "--cap-drop" "ALL" "--die-with-parent" "--unshare-user" "--uid" "${UIDBASE:-0}" "--gid" "${GIDBASE:-0}" "--unshare-ipc" "--unshare-pid" "--unshare-uts" "--unshare-cgroup" "--ro-bind" "$rootfs" "/" "--dev" "/dev" "--proc" "/proc" "--tmpfs" "/tmp" "--tmpfs" "/home" "--chdir" "/" )
+	cmd=( "bwrap" "--clearenv" "--setenv" "PATH" "/usr/local/bin:/usr/bin:/bin:/usr/sbin" "--hostname" "$(basename "$rootfs")" "--cap-drop" "ALL" "--die-with-parent" "--unshare-user" "--uid" "${UIDBASE:-0}" "--gid" "${GIDBASE:-0}" "--unshare-ipc" "--unshare-pid" "--unshare-uts" "--unshare-cgroup" "--ro-bind" "$rootfs" "/" "--dev" "/dev" "--proc" "/proc" "--tmpfs" "/tmp" "--tmpfs" "/home" "--chdir" "/" )
 	if [[ -n "${share_net:-}" ]]; then
 		einfo "ENABLING NETWORK SUPPORT"
 		cmd+=( "--share-net" )
