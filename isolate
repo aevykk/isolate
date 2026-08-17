@@ -25,11 +25,12 @@ RUNDIR="$(dirname "$(realpath "$0")")"
 source "$RUNDIR/common.sh"
 
 print_usage_and_exit() {
-	echo "spawn:                        $0 [-e engine] [-t templatedir] [-1] [-2] [-n] [-p pwd] [-d dir_host:target_ctr]... [-v env_name:env_value]... [command] [args] ..."
-	echo "spawn:                        $0 [-e engine] [-z zfs_template] [-1] [-2] [-n] [-p pwd] [-d dir_host:target_ctr]... [-v env_name:env_value]... [command] [args] ..."
-	echo "refresh available zfs clones: $0 [-r template] [-f] [-s] [num_should_avail]"
+        local binname="$(basename "$0")"
+	echo "spawn:                        $binname [-e engine] [-t templatedir] [-1] [-2] [-n] [-p pwd] [-d dir_host:target_ctr]... [-v env_name:env_value]... [command] [args] ..."
+	echo "spawn:                        $binname [-e engine] [-z zfs_template] [-1] [-2] [-n] [-p pwd] [-d dir_host:target_ctr]... [-v env_name:env_value]... [command] [args] ..."
+	echo "refresh available zfs clones: $binname [-r template] [-f] [-s] [num_should_avail]"
 	echo "  [!] refresh ALWAYS uses the latest snapshot on the dataset"
-	echo "install seccomp wrapper:      $0 -w template"
+	echo "install seccomp wrapper:      $binname -w template"
 	echo ""
 	echo "OPTIONS"
 	echo "         -e: engine: one of {bwrap, chroot, lxc}, defaults to bwrap"
@@ -600,7 +601,7 @@ else
 
 	[[ -d "$rootfs" ]] || die "rootfs $rootfs does not exist"
 
-	einfo "Using engine ${ENGINE:-bwrap}, wroom wroom"
+	einfo "Using engine ${ENGINE:-bwrap}"
 	# on a zfs clone, record our pid so the refresh path knows the clone is in use.
 	# the pidfile lives in the group-writable .isolate_pids dir (see consume/refresh),
 	# and is removed by the cleanup trap on exit. template (-t) mode needs no pidfile.
