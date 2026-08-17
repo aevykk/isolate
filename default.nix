@@ -12,7 +12,7 @@
 , xhost
 , procps
 , nettools
-, glibc
+, getent
 }:
 
 let
@@ -50,7 +50,7 @@ let
     xhost
     procps      # ps
     nettools    # hostname (used by common.sh)
-    glibc.bin   # getent
+    getent      # split out of glibc.bin since glibc 2.42
   ];
 in
 stdenv.mkDerivation {
